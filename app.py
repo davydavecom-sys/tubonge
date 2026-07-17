@@ -32,6 +32,7 @@ db = SQLAlchemy(app)
 # ==========================================
 # DATABASE MODELS
 # ==========================================
+
 class User(db.Model):
     __tablename__ = 'users'
 
@@ -54,13 +55,60 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
-        """Helper to format user data cleanly into JSON responses for an Android app"""
+        """Helper to format user data cleanly into JSON responses for your Android app"""
         return {
             "id": self.id,
             "username": self.username,
             "email": self.email,
             "created_at": self.created_at.isoformat()
         }
+
+
+class ChatRoom(db.Model):
+    __tablename__ = 'chat_rooms'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=True)  # Nullable for private 1-on-1 direct messages
+    is_group = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Dynamic relationship to easily fetch messages inside this room
+    messages = db.relationship('Message', backref='room', lazy='dynamic', cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name or "Private Chat",
+            "is_group": self.is_group,
+            "created_at": self.created_at.isoformat()
+        }
+
+
+class Message(db.Model):
+    __tablename__ = 'messages'
+
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Foreign Keys link back to the room and the user who sent it
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id', ondelete='CASCADE'), nullable=False, index=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    content = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)  # Indexed for fast chronological sorting
+
+    # Relationship to fetch sender details easily without tedious manual joins
+    sender = db.relationship('User', backref=db.backref('user_messages', lazy='dynamic'))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "room_id": self.room_id,
+            "sender_id": self.sender_id,
+            "sender_name": self.sender.username if self.sender else "Unknown",
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat()
+        }
+
 
 # Create database tables automatically if they don't exist yet in Neon
 with app.app_context():
@@ -74,13 +122,12 @@ with app.app_context():
 
 @app.route('/')
 def home():
-    return "Secure API Gateway is Live!", 200
+    return "Tubonge Secure API Gateway is Live!", 200
 
 
 @app.route('/db-test')
 def test_db():
     try:
-        # Executes a raw text query to test the handshake
         db.session.execute(db.text('SELECT 1')).scalar()
         return {"status": "success", "message": "Successfully connected to Neon Postgres!"}, 200
     except Exception as e:
@@ -91,7 +138,6 @@ def test_db():
 def register():
     data = request.get_json() or {}
     
-    # Validation checks
     if 'username' not in data or 'email' not in data or 'password' not in data:
         return jsonify({"status": "error", "message": "Missing required fields: username, email, password"}), 400
         
@@ -102,17 +148,15 @@ def register():
     if not username or not email or not password:
         return jsonify({"status": "error", "message": "Fields cannot be blank"}), 400
 
-    # Check if user already exists
     if User.query.filter_by(username=username).first():
         return jsonify({"status": "error", "message": "Username is already taken"}), 400
         
     if User.query.filter_by(email=email).first():
         return jsonify({"status": "error", "message": "Email is already registered"}), 400
 
-    # Create and commit new user record securely
     try:
         new_user = User(username=username, email=email)
-        new_user.set_password(password)  # Hashes the password under the hood
+        new_user.set_password(password)
         
         db.session.add(new_user)
         db.session.commit()
@@ -137,10 +181,8 @@ def login():
     if not username_or_email or not password:
         return jsonify({"status": "error", "message": "Missing identifier or password"}), 400
 
-    # Support login using either the unique username or email handle
     user = User.query.filter((User.username == username_or_email) | (User.email == username_or_email.lower())).first()
 
-    # Secure verification verification step
     if user and user.check_password(password):
         return jsonify({
             "status": "success",
