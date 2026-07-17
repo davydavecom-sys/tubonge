@@ -1,6 +1,5 @@
 import os
 from flask import Flask
-from dotenv import load_application_env  # Or simply load_dotenv()
 from dotenv import load_dotenv
 
 # Now call the correct function name to load your keys
