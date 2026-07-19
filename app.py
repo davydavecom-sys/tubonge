@@ -33,7 +33,7 @@ class User(db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
-    
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
     def check_password(self, password):
@@ -44,6 +44,7 @@ class User(db.Model):
 class ChatRoom(db.Model):
     __tablename__ = 'chat_rooms'
     id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=True)
     is_group = db.Column(db.Boolean, default=False)
     participants = db.relationship('ChatParticipant', backref='room', lazy='dynamic')
     messages = db.relationship('Message', backref='room', lazy='dynamic')
@@ -54,6 +55,8 @@ class ChatParticipant(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id', ondelete='CASCADE'), nullable=False)
 
+    user = db.relationship('User', backref='chat_memberships')
+
 class Message(db.Model):
     __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
@@ -61,7 +64,7 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
     sender = db.relationship('User', backref='messages')
 
     def to_dict(self):
@@ -71,7 +74,7 @@ class Message(db.Model):
             "sender_id": self.sender_id,
             "sender_name": self.sender.username,
             "content": self.content,
-            "timestamp": self.timestamp.strftime("%H:%M") # Appears as "10:30"
+            "timestamp": self.timestamp.strftime("%H:%M")
         }
 
 # ==========================================
@@ -106,7 +109,6 @@ def search_users():
 def initiate_chat():
     data = request.get_json()
     u1, u2 = data['user_id_a'], data['user_id_b']
-    # Check for existing 1-on-1
     room = db.session.query(ChatRoom).join(ChatParticipant).filter(ChatRoom.is_group == False)\
         .filter(ChatParticipant.user_id.in_([u1, u2])).group_by(ChatRoom.id).having(func.count(ChatParticipant.id) == 2).first()
     if room:
@@ -117,6 +119,33 @@ def initiate_chat():
     db.session.add_all([ChatParticipant(user_id=u1, room_id=new_room.id), ChatParticipant(user_id=u2, room_id=new_room.id)])
     db.session.commit()
     return jsonify({"status": "success", "chatId": new_room.id}), 201
+
+@app.route('/api/chats/user_chats', methods=['GET'])
+def get_user_chats():
+    user_id = request.args.get('user_id', type=int)
+    # Find all rooms the user is in
+    rooms = db.session.query(ChatRoom).join(ChatParticipant).filter(ChatParticipant.user_id == user_id).all()
+
+    results = []
+    for room in rooms:
+        # Determine display name
+        if room.is_group:
+            display_name = room.name or "Group Chat"
+        else:
+            # For 1-on-1, find the OTHER participant
+            other_p = ChatParticipant.query.filter(ChatParticipant.room_id == room.id, ChatParticipant.user_id != user_id).first()
+            display_name = other_p.user.username if other_p else "Private Chat"
+
+        last_msg = room.messages.order_by(Message.timestamp.desc()).first()
+
+        results.append({
+            "id": room.id,
+            "display_name": display_name,
+            "last_message": last_msg.content if last_msg else None,
+            "timestamp": last_msg.timestamp.strftime("%H:%M") if last_msg else None
+        })
+
+    return jsonify(results)
 
 @app.route('/api/chats/messages', methods=['GET'])
 def get_messages():
