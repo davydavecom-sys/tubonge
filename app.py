@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -11,18 +11,22 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Database Setup
+# Database Configuration
 database_url = os.environ.get('DATABASE_URL')
 if database_url and database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'local-dev-fallback')
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True, "pool_recycle": 300}
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- Models ---
+# ==========================================
+# DATABASE MODELS
+# ==========================================
+
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -30,6 +34,10 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
 
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
     def to_dict(self):
         return {"id": self.id, "username": self.username, "email": self.email}
 
@@ -46,7 +54,8 @@ class ChatParticipant(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id', ondelete='CASCADE'), nullable=False)
-    user = db.relationship('User', backref='memberships')
+
+    user = db.relationship('User', backref='chat_memberships')
 
 class Message(db.Model):
     __tablename__ = 'messages'
@@ -55,7 +64,8 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    sender = db.relationship('User', backref='sent_messages')
+
+    sender = db.relationship('User', backref='messages')
 
     def to_dict(self):
         return {
@@ -67,47 +77,89 @@ class Message(db.Model):
             "timestamp": self.timestamp.strftime("%H:%M")
         }
 
-# Ensure Room 1 exists
-with app.app_context():
-    db.create_all()
-    if not ChatRoom.query.get(1):
-        db.session.add(ChatRoom(id=1, name="Tubonge Updates", is_group=True))
-        db.session.commit()
+# ==========================================
+# API ROUTES
+# ==========================================
 
-# --- Routes ---
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    new_user = User(username=data['username'], email=data['email'])
+    new_user.set_password(data['password'])
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"status": "success", "user": new_user.to_dict()}), 201
+
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(email=data['email']).first()
-    if user and check_password_hash(user.password_hash, data['password']):
-        # Auto-join updates room
-        if not ChatParticipant.query.filter_by(user_id=user.id, room_id=1).first():
-            db.session.add(ChatParticipant(user_id=user.id, room_id=1))
-            db.session.commit()
-        return jsonify({"status": "success", "user": user.to_dict()})
+    if user and user.check_password(data['password']):
+        return jsonify({"status": "success", "user": user.to_dict()}), 200
     return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+@app.route('/api/users/search', methods=['GET'])
+def search_users():
+    query = request.args.get('query', '')
+    similarity = func.similarity(User.username, query)
+    results = User.query.filter(User.username.ilike(f"%{query}%")).order_by(similarity.desc()).limit(5).all()
+    return jsonify([user.to_dict() for user in results])
+
+@app.route('/api/chats/initiate', methods=['POST'])
+def initiate_chat():
+    data = request.get_json()
+    u1, u2 = data['user_id_a'], data['user_id_b']
+    room = db.session.query(ChatRoom).join(ChatParticipant).filter(ChatRoom.is_group == False)\
+        .filter(ChatParticipant.user_id.in_([u1, u2])).group_by(ChatRoom.id).having(func.count(ChatParticipant.id) == 2).first()
+    if room:
+        return jsonify({"status": "success", "chatId": room.id})
+    new_room = ChatRoom(is_group=False)
+    db.session.add(new_room)
+    db.session.flush()
+    db.session.add_all([ChatParticipant(user_id=u1, room_id=new_room.id), ChatParticipant(user_id=u2, room_id=new_room.id)])
+    db.session.commit()
+    return jsonify({"status": "success", "chatId": new_room.id}), 201
 
 @app.route('/api/chats/user_chats', methods=['GET'])
 def get_user_chats():
-    uid = request.args.get('user_id', type=int)
-    # Find all rooms where the user is a participant
-    memberships = ChatParticipant.query.filter_by(user_id=uid).all()
+    user_id = request.args.get('user_id', type=int)
+    # Find all rooms the user is in
+    rooms = db.session.query(ChatRoom).join(ChatParticipant).filter(ChatParticipant.user_id == user_id).all()
+
     results = []
-    for m in memberships:
-        room = m.room
+    for room in rooms:
+        # Determine display name
         if room.is_group:
-            name = room.name or "Group"
+            display_name = room.name or "Group Chat"
         else:
-            other = ChatParticipant.query.filter(ChatParticipant.room_id == room.id, ChatParticipant.user_id != uid).first()
-            name = other.user.username if other else "Private Chat"
-        
-        last = room.messages.order_by(Message.timestamp.desc()).first()
+            # For 1-on-1, find the OTHER participant
+            other_p = ChatParticipant.query.filter(ChatParticipant.room_id == room.id, ChatParticipant.user_id != user_id).first()
+            display_name = other_p.user.username if other_p else "Private Chat"
+
+        last_msg = room.messages.order_by(Message.timestamp.desc()).first()
+
         results.append({
             "id": room.id,
-            "display_name": name,
-            "last_message": last.content if last else "No messages yet",
-            "timestamp": last.timestamp.strftime("%H:%M") if last else None
+            "display_name": display_name,
+            "last_message": last_msg.content if last_msg else None,
+            "timestamp": last_msg.timestamp.strftime("%H:%M") if last_msg else None
         })
+
     return jsonify(results)
 
-# [Include existing /register, /search, /initiate, /messages, /send routes]
+@app.route('/api/chats/messages', methods=['GET'])
+def get_messages():
+    room_id = request.args.get('room_id')
+    messages = Message.query.filter_by(room_id=room_id).order_by(Message.timestamp.asc()).all()
+    return jsonify([m.to_dict() for m in messages])
+
+@app.route('/api/chats/send', methods=['POST'])
+def send_message():
+    data = request.get_json()
+    msg = Message(room_id=data['room_id'], sender_id=data['sender_id'], content=data['content'])
+    db.session.add(msg)
+    db.session.commit()
+    return jsonify({"status": "success"}), 201
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
