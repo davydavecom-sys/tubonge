@@ -156,10 +156,25 @@ def get_messages():
 @app.route('/api/chats/send', methods=['POST'])
 def send_message():
     data = request.get_json()
-    msg = Message(room_id=data['room_id'], sender_id=data['sender_id'], content=data['content'])
+    room_id = data.get('room_id')
+
+    # 🛡️ RESTRICTION: Block users from sending messages to the official Tubonge channel (ID: 1)
+    if room_id == 1:
+        return jsonify({"status": "error", "message": "You cannot send messages to this official channel."}), 403
+
+    msg = Message(room_id=room_id, sender_id=data['sender_id'], content=data['content'])
     db.session.add(msg)
     db.session.commit()
     return jsonify({"status": "success"}), 201
+
+@app.route('/api/app/version', methods=['GET'])
+def get_version():
+    return jsonify({
+        "versionCode": 2, # Increment this when you release a new APK
+        "versionName": "1.1",
+        "downloadUrl": "https://github.com/your-repo/tubonge/releases/download/v1.1/tubonge-v1.1.apk",
+        "updatePriority": 1
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
