@@ -174,7 +174,8 @@ def get_version():
         "versionName": "1.0",
         "downloadUrl": "https://github.com/your-repo/tubonge/releases/download/v1.0/tubonge-v1.0.apk",
         "updatePriority": 1,
-        "agoraAppId": os.environ.get('AGORA_APP_ID', 'YOUR_AGORA_APP_ID')
+        "agoraAppId": os.environ.get('AGORA_APP_ID', 'YOUR_AGORA_APP_ID'),
+        "agoraToken": os.environ.get('AGORA_TOKEN', None) # Optional: Use for 'Safe Mode' projects
     })
 
 if __name__ == '__main__':
