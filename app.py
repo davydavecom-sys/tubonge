@@ -170,10 +170,11 @@ def send_message():
 @app.route('/api/app/version', methods=['GET'])
 def get_version():
     return jsonify({
-        "versionCode": 2, # Increment this when you release a new APK
-        "versionName": "1.1",
-        "downloadUrl": "https://github.com/your-repo/tubonge/releases/download/v1.1/tubonge-v1.1.apk",
-        "updatePriority": 1
+        "versionCode": 1, # Increment this when you release a new APK
+        "versionName": "1.0",
+        "downloadUrl": "https://github.com/your-repo/tubonge/releases/download/v1.0/tubonge-v1.0.apk",
+        "updatePriority": 1,
+        "agoraAppId": os.environ.get('AGORA_APP_ID', 'YOUR_AGORA_APP_ID')
     })
 
 if __name__ == '__main__':
